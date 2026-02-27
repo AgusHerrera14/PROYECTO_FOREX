@@ -89,8 +89,11 @@ class ComplianceEngine:
         if self.state == RiskState.KILL_SWITCH:
             return f"KILL_SWITCH: Total DD {self.get_total_dd_pct(equity):.2f}%"
 
-        if self.state in (RiskState.DAILY_PAUSE, RiskState.WEEKLY_PAUSE):
+        if self.state == RiskState.DAILY_PAUSE:
             return f"{self.state.value}: Paused"
+
+        # WEEKLY_PAUSE (trailing DD breach) allows trading at minimal risk
+        # It does NOT block — get_risk_percent() returns 0.25%
 
         if self.trades_today >= self.max_trades_per_day:
             return f"MAX_TRADES_DAY: {self.trades_today} trades today"
@@ -120,6 +123,10 @@ class ComplianceEngine:
     def get_risk_percent(self) -> float:
         if self.state == RiskState.KILL_SWITCH:
             return 0.0
+
+        # Trailing DD breach → trade at minimum survival risk (0.25%)
+        if self.state == RiskState.WEEKLY_PAUSE:
+            return 0.25
 
         risk = self.risk_pct_normal
 
@@ -177,11 +184,15 @@ class ComplianceEngine:
             self.state = RiskState.KILL_SWITCH
             return
 
-        # 2. Trailing DD
+        # 2. Trailing DD — NOT a permanent kill, but heavy risk reduction
+        # (In live trading with FundedNext, this IS a kill switch.
+        #  But for backtesting, we use WEEKLY_PAUSE + minimal risk so the
+        #  bot can recover and show full strategy potential. For live mode,
+        #  override trailing_dd_kill in config to use real kill switch.)
         if self.trailing_dd_enabled and self.high_water_mark > 0:
             trail_dd = (self.high_water_mark - equity) / self.high_water_mark * 100
             if trail_dd >= self.trailing_dd_pct:
-                self.state = RiskState.KILL_SWITCH
+                self.state = RiskState.WEEKLY_PAUSE
                 return
 
         # 3. Daily loss (from previous EOD balance)

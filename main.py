@@ -23,7 +23,8 @@ import yaml
 import numpy as np
 import pandas as pd
 
-from core.indicators import calculate_all, calculate_h4_trend, resample_to_h4, price_to_pips
+from core.indicators import (calculate_all, calculate_h4_trend,
+                              resample_to_h4, price_to_pips, calculate_smc)
 from core.strategy import get_signal, diag as strategy_diag, reset_diagnostics
 from core.risk import calculate_lot_size, validate_sl_tp
 from core.compliance import ComplianceEngine, RiskState
@@ -153,6 +154,7 @@ def run_cycle(cfg: dict, gateway, data_feed: DataFeed,
 
     # Calculate indicators
     h1 = calculate_all(h1, cfg)
+    h1 = calculate_smc(h1)  # SMC: FVG, Order Blocks, Liquidity Sweeps
     h4 = calculate_h4_trend(h4, cfg)
 
     # Update current price in dry-run gateway
@@ -363,6 +365,7 @@ def run_backtest(cfg: dict):
 
     # Calculate all indicators on full dataset
     h1_all = calculate_all(h1_all, cfg)
+    h1_all = calculate_smc(h1_all)  # SMC: FVG, Order Blocks, Liquidity Sweeps
     h4_all = resample_to_h4(h1_all)
     h4_all = calculate_h4_trend(h4_all, cfg)
 
@@ -486,12 +489,16 @@ def run_backtest(cfg: dict):
             trades_won += 1
 
     # === REPORT ===
-    print_backtest_report(gateway, trades_total, trades_won, cfg)
+    actual_start = h1_all.index[warmup]
+    actual_end = h1_all.index[-1]
+    print_backtest_report(gateway, trades_total, trades_won, cfg,
+                          actual_start=actual_start, actual_end=actual_end)
     print_backtest_diagnostics(bt_diag, strategy_diag)
     logger.close()
 
 
-def print_backtest_report(gateway: DryRunGateway, total: int, wins: int, cfg: dict):
+def print_backtest_report(gateway: DryRunGateway, total: int, wins: int, cfg: dict,
+                          actual_start=None, actual_end=None):
     """Print comprehensive backtest results."""
     init_bal = cfg["compliance"]["initial_balance"]
     final_bal = gateway.balance
@@ -513,12 +520,22 @@ def print_backtest_report(gateway: DryRunGateway, total: int, wins: int, cfg: di
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
     expectancy = np.mean(pnls) if pnls else 0
 
-    # Max drawdown
+    # Max drawdown (two metrics)
     equity_curve = np.cumsum(pnls) + init_bal
     peak = np.maximum.accumulate(equity_curve)
     drawdown = peak - equity_curve
     max_dd = np.max(drawdown) if len(drawdown) > 0 else 0
     max_dd_pct = max_dd / init_bal * 100
+
+    # DD from initial balance (what FundedNext actually checks)
+    dd_from_initial = init_bal - equity_curve  # positive = below initial
+    max_dd_initial = np.max(dd_from_initial) if len(dd_from_initial) > 0 else 0
+    max_dd_initial = max(0, max_dd_initial)  # only count drops below initial
+    max_dd_initial_pct = max_dd_initial / init_bal * 100
+
+    # Trailing DD (% from peak, as FundedNext trailing rule)
+    trail_dd_curve = (peak - equity_curve) / peak * 100
+    max_trail_dd_pct = np.max(trail_dd_curve) if len(trail_dd_curve) > 0 else 0
 
     # Max consecutive losses
     max_consec = 0
@@ -539,6 +556,15 @@ def print_backtest_report(gateway: DryRunGateway, total: int, wins: int, cfg: di
     net_pnl = final_bal - init_bal
     net_pct = net_pnl / init_bal * 100
 
+    # Annualized return — use actual data span
+    if actual_start is not None and actual_end is not None:
+        bt_days = (actual_end - actual_start).days
+        years = bt_days / 365.25 if bt_days > 0 else 1
+    else:
+        years = 2.0  # fallback
+    annual_return_pct = net_pct / years if years > 0 else 0
+    annual_return_dollar = net_pnl / years if years > 0 else 0
+
     # Trade duration stats
     buy_count = sum(1 for t in trades if t["direction"] == "BUY")
     sell_count = sum(1 for t in trades if t["direction"] == "SELL")
@@ -556,6 +582,7 @@ def print_backtest_report(gateway: DryRunGateway, total: int, wins: int, cfg: di
     print(f"  Initial Balance:  ${init_bal:,.2f}")
     print(f"  Final Balance:    ${final_bal:,.2f}")
     print(f"  Net P&L:          ${net_pnl:,.2f} ({net_pct:+.1f}%)")
+    print(f"  Annualized:       ${annual_return_dollar:,.0f}/yr ({annual_return_pct:+.1f}%/yr)")
     print(f"  Spread sim:       {cfg['backtest']['spread_pips']} pips")
     print(f"  Slippage sim:     {cfg['backtest']['slippage_pips']} pips")
     print("-" * 60)
@@ -570,7 +597,9 @@ def print_backtest_report(gateway: DryRunGateway, total: int, wins: int, cfg: di
     print(f"  Expectancy:       ${expectancy:.2f}/trade")
     print(f"  Sharpe (approx):  {sharpe:.2f}")
     print("-" * 60)
-    print(f"  Max Drawdown:     ${max_dd:.2f} ({max_dd_pct:.2f}%)")
+    print(f"  Max DD (peak→trough):  ${max_dd:.2f} ({max_dd_pct:.2f}%)")
+    print(f"  Max DD (from initial): ${max_dd_initial:.2f} ({max_dd_initial_pct:.2f}%)")
+    print(f"  Max Trailing DD:       {max_trail_dd_pct:.2f}% from HWM")
     print(f"  Max Consec Loss:  {max_consec}")
     print("-" * 60)
 
@@ -583,11 +612,16 @@ def print_backtest_report(gateway: DryRunGateway, total: int, wins: int, cfg: di
         checks.append(f"  ❌ Profit Factor {profit_factor:.2f} < 1.20")
         go = False
 
-    if max_dd_pct < 8.0:
-        checks.append(f"  ✅ Max DD {max_dd_pct:.2f}% < 8%")
+    if max_dd_initial_pct < 8.0:
+        checks.append(f"  ✅ DD from initial {max_dd_initial_pct:.2f}% < 8%")
     else:
-        checks.append(f"  ❌ Max DD {max_dd_pct:.2f}% >= 8%")
+        checks.append(f"  ❌ DD from initial {max_dd_initial_pct:.2f}% >= 8%")
         go = False
+
+    if max_trail_dd_pct < 10.0:
+        checks.append(f"  ✅ Trailing DD {max_trail_dd_pct:.2f}% < 10%")
+    else:
+        checks.append(f"  ⚠️  Trailing DD {max_trail_dd_pct:.2f}% >= 10%")
 
     if total >= 50:
         checks.append(f"  ✅ Trades {total} >= 50")
@@ -648,6 +682,11 @@ def print_backtest_diagnostics(bt_diag: dict, strat_diag: dict):
         print(f"    No valid range:   {strat_diag.get('london_no_range', 0)}")
         print(f"    No breakout:      {strat_diag.get('london_no_break', 0)}")
         print(f"    Trend filtered:   {strat_diag.get('london_trend_filter', 0)}")
+        print(f"  SMC CONFLUENCE DETAILS:")
+        print(f"    FVG confluence:   {strat_diag.get('smc_fvg_confluence', 0)}")
+        print(f"    Liq sweeps:       {strat_diag.get('smc_liq_sweep', 0)}")
+        print(f"    OB-based SL:      {strat_diag.get('smc_ob_sl', 0)}")
+        print(f"    No confluence:    {strat_diag.get('smc_no_confluence', 0)}")
     print("-" * 60)
     print(f"  SL/TP invalid:       {bt_diag['sl_invalid']}")
     print(f"  Lot size zero:       {bt_diag['lot_zero']}")

@@ -3,12 +3,13 @@ core/strategy.py - Trading strategy module.
 
 Supports two strategies (configured via london_breakout flag):
 
-1. London Breakout (primary):
+1. London Breakout + SMC (primary):
    - Calculates Asian session range (00:00-06:00 UTC)
-   - Enters on breakout during London/NY session (07:00-11:00 UTC)
-   - SL at opposite end of Asian range + buffer
+   - Enters on breakout during London session (07:00-10:00 UTC)
+   - SMC confluence: FVG, Order Blocks, Liquidity Sweeps
+   - SL at opposite end of Asian range (or Order Block)
    - TP = SL * RR ratio
-   - Optional EMA200 trend bias filter
+   - EMA200 trend bias filter + SMC filters
 
 2. Momentum Breakout (fallback):
    - H1 EMA200 trend + Donchian breakout / EMA21 pullback
@@ -17,7 +18,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 import pandas as pd
-from core.indicators import price_to_pips, pip_size
+import numpy as np
+from core.indicators import (price_to_pips, pip_size, has_recent_fvg,
+                              has_recent_liquidity_sweep, get_nearest_ob_sl)
 
 
 @dataclass
@@ -48,6 +51,10 @@ diag = {
     "london_wrong_hour": 0,
     "london_no_break": 0,
     "london_trend_filter": 0,
+    "smc_fvg_confluence": 0,
+    "smc_liq_sweep": 0,
+    "smc_ob_sl": 0,
+    "smc_no_confluence": 0,
 }
 
 
@@ -288,8 +295,19 @@ def _london_breakout(h1: pd.DataFrame, cfg: dict,
         return None
 
     # ---------------------------------------------------------------
-    # MODE B: RAW BREAKOUT (original London Breakout)
+    # MODE B: SMC-ENHANCED BREAKOUT
     # ---------------------------------------------------------------
+    # SMC config
+    use_fvg = s.get("smc_fvg_filter", False)
+    fvg_lb = s.get("smc_fvg_lookback", 12)
+    use_liq_sweep = s.get("smc_liq_sweep_bonus", False)
+    liq_lb = s.get("smc_liq_lookback", 8)
+    use_ob_sl = s.get("smc_ob_sl", False)
+    require_conf = s.get("smc_require_confluence", False)
+
+    # Current bar index in the DataFrame
+    bar_idx = len(h1) - 1
+
     # === BUY: close breaks above Asian high ===
     if close > asian_high:
         if use_trend_filter and ema200 > 0 and close < ema200:
@@ -297,25 +315,56 @@ def _london_breakout(h1: pd.DataFrame, cfg: dict,
         elif body_ratio < 0.3 or close <= b0["open"]:
             diag["no_candle"] += 1
         else:
-            entry = current_ask if current_ask > 0 else close
-            sl = asian_low - buffer
-            sl_dist = entry - sl
-            sl_pips = price_to_pips(sl_dist)
+            # --- SMC Confluence Check ---
+            smc_tags = []
+            has_fvg = has_recent_fvg(h1, bar_idx, 1, fvg_lb) if use_fvg else False
+            has_sweep = has_recent_liquidity_sweep(h1, bar_idx, 1, liq_lb) if use_liq_sweep else False
 
-            if min_sl <= sl_pips <= 80:
-                tp = entry + sl_dist * rr_ratio
-                diag["signals_generated"] += 1
-                diag["breakout_signals"] += 1
-                return Signal(
-                    direction=1, entry=round(entry, 5),
-                    sl=round(sl, 5), tp=round(tp, 5),
-                    sl_pips=round(sl_pips, 1),
-                    tp_pips=round(price_to_pips(tp - entry), 1),
-                    reason=f"BUY_{session_tag}|Range={asian_range_pips:.0f}p"
-                )
+            if has_fvg:
+                smc_tags.append("FVG")
+                diag["smc_fvg_confluence"] += 1
+            if has_sweep:
+                smc_tags.append("SWEEP")
+                diag["smc_liq_sweep"] += 1
+
+            # If confluence required but none found → skip
+            if require_conf and not smc_tags:
+                diag["smc_no_confluence"] += 1
             else:
-                diag["no_sl_valid"] += 1
-                return None
+                entry = current_ask if current_ask > 0 else close
+
+                # --- SL: try Order Block first, fallback to Asian low ---
+                sl = asian_low - buffer
+                if use_ob_sl:
+                    ob_sl = get_nearest_ob_sl(h1, bar_idx, 1, entry)
+                    if ob_sl > 0:
+                        sl = ob_sl - buffer * 0.5
+                        smc_tags.append("OB_SL")
+                        diag["smc_ob_sl"] += 1
+
+                sl_dist = entry - sl
+                sl_pips = price_to_pips(sl_dist)
+
+                if min_sl <= sl_pips <= 80:
+                    # Adjust RR based on SMC confluence
+                    effective_rr = rr_ratio
+                    if len(smc_tags) >= 2:
+                        effective_rr = rr_ratio * 1.15  # Boost TP when strong confluence
+                    tp = entry + sl_dist * effective_rr
+
+                    smc_str = "+".join(smc_tags) if smc_tags else "RAW"
+                    diag["signals_generated"] += 1
+                    diag["breakout_signals"] += 1
+                    return Signal(
+                        direction=1, entry=round(entry, 5),
+                        sl=round(sl, 5), tp=round(tp, 5),
+                        sl_pips=round(sl_pips, 1),
+                        tp_pips=round(price_to_pips(tp - entry), 1),
+                        reason=f"BUY_{session_tag}|{smc_str}|R={asian_range_pips:.0f}p"
+                    )
+                else:
+                    diag["no_sl_valid"] += 1
+                    return None
 
     # === SELL: close breaks below Asian low ===
     if close < asian_low:
@@ -324,25 +373,54 @@ def _london_breakout(h1: pd.DataFrame, cfg: dict,
         elif body_ratio < 0.3 or close >= b0["open"]:
             diag["no_candle"] += 1
         else:
-            entry = current_bid if current_bid > 0 else close
-            sl = asian_high + buffer
-            sl_dist = sl - entry
-            sl_pips = price_to_pips(sl_dist)
+            # --- SMC Confluence Check ---
+            smc_tags = []
+            has_fvg = has_recent_fvg(h1, bar_idx, -1, fvg_lb) if use_fvg else False
+            has_sweep = has_recent_liquidity_sweep(h1, bar_idx, -1, liq_lb) if use_liq_sweep else False
 
-            if min_sl <= sl_pips <= 80:
-                tp = entry - sl_dist * rr_ratio
-                diag["signals_generated"] += 1
-                diag["breakout_signals"] += 1
-                return Signal(
-                    direction=-1, entry=round(entry, 5),
-                    sl=round(sl, 5), tp=round(tp, 5),
-                    sl_pips=round(sl_pips, 1),
-                    tp_pips=round(price_to_pips(entry - tp), 1),
-                    reason=f"SELL_{session_tag}|Range={asian_range_pips:.0f}p"
-                )
+            if has_fvg:
+                smc_tags.append("FVG")
+                diag["smc_fvg_confluence"] += 1
+            if has_sweep:
+                smc_tags.append("SWEEP")
+                diag["smc_liq_sweep"] += 1
+
+            if require_conf and not smc_tags:
+                diag["smc_no_confluence"] += 1
             else:
-                diag["no_sl_valid"] += 1
-                return None
+                entry = current_bid if current_bid > 0 else close
+
+                # --- SL: try Order Block first, fallback to Asian high ---
+                sl = asian_high + buffer
+                if use_ob_sl:
+                    ob_sl = get_nearest_ob_sl(h1, bar_idx, -1, entry)
+                    if ob_sl > 0:
+                        sl = ob_sl + buffer * 0.5
+                        smc_tags.append("OB_SL")
+                        diag["smc_ob_sl"] += 1
+
+                sl_dist = sl - entry
+                sl_pips = price_to_pips(sl_dist)
+
+                if min_sl <= sl_pips <= 80:
+                    effective_rr = rr_ratio
+                    if len(smc_tags) >= 2:
+                        effective_rr = rr_ratio * 1.15
+                    tp = entry - sl_dist * effective_rr
+
+                    smc_str = "+".join(smc_tags) if smc_tags else "RAW"
+                    diag["signals_generated"] += 1
+                    diag["breakout_signals"] += 1
+                    return Signal(
+                        direction=-1, entry=round(entry, 5),
+                        sl=round(sl, 5), tp=round(tp, 5),
+                        sl_pips=round(sl_pips, 1),
+                        tp_pips=round(price_to_pips(entry - tp), 1),
+                        reason=f"SELL_{session_tag}|{smc_str}|R={asian_range_pips:.0f}p"
+                    )
+                else:
+                    diag["no_sl_valid"] += 1
+                    return None
 
     diag["london_no_break"] += 1
     return None
