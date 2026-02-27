@@ -1,0 +1,13 @@
+# FundedNext EURUSD Trading Bot - Dependencies
+# Works on Mac (dry_run/backtest) and Windows VPS (live)
+
+PyYAML>=6.0
+pandas>=2.0.0
+pandas_ta>=0.3.14b1
+numpy>=1.24.0
+yfinance>=0.2.36
+requests>=2.31.0
+
+# NOTE: MetaTrader5 package is Windows-only.
+# On Windows VPS, also run: pip install MetaTrader5
+# Do NOT add MetaTrader5 here - it will fail on Mac.

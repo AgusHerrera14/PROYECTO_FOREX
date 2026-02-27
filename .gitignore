@@ -1,0 +1,30 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Environment & secrets
+.env
+*.key
+credentials.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs (keep structure, ignore contents)
+logs/*.log
+logs/*.csv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
