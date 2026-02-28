@@ -19,6 +19,7 @@ Thumbs.db
 # Logs (keep structure, ignore contents)
 logs/*.log
 logs/*.csv
+logs/*.json
 
 # IDE
 .vscode/
