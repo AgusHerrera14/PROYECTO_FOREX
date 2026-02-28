@@ -26,5 +26,9 @@ logs/*.csv
 *.swp
 *.swo
 
+# MQL5 compiled
+*.ex5
+*.ex4
+
 # Claude Code
 .claude/

@@ -183,7 +183,7 @@ def _london_breakout(h1: pd.DataFrame, cfg: dict,
             rb = recent_bars.iloc[idx]
             rb_time = recent_bars.index[idx]
             rb_hour = rb_time.hour
-            if rb_hour < entry_start or rb_hour >= s.get("london_entry_end", 14):
+            if rb_hour < london_start or rb_hour >= london_end:
                 continue
             if rb["close"] > asian_high and rb["close"] > rb["open"]:
                 buy_breakout_found = True
