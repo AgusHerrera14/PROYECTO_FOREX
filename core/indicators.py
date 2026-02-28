@@ -1,10 +1,70 @@
 """
 core/indicators.py - Technical indicator calculations.
-Pure pandas/pandas_ta, platform-independent.
+Pure pandas/numpy, no external TA library needed.
 """
 import pandas as pd
-import pandas_ta as ta
+import numpy as np
 
+
+# =====================================================================
+# BASE INDICATORS (pure pandas/numpy, replacing pandas_ta)
+# =====================================================================
+
+def _ema(series: pd.Series, length: int) -> pd.Series:
+    """Exponential Moving Average (Wilder-compatible)."""
+    return series.ewm(span=length, adjust=False).mean()
+
+
+def _rsi(series: pd.Series, length: int = 14) -> pd.Series:
+    """Wilder's RSI."""
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1.0 / length, min_periods=length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / length, min_periods=length, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def _atr(high: pd.Series, low: pd.Series, close: pd.Series,
+         length: int = 14) -> pd.Series:
+    """Average True Range (Wilder's smoothing)."""
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.ewm(alpha=1.0 / length, min_periods=length, adjust=False).mean()
+
+
+def _adx(high: pd.Series, low: pd.Series, close: pd.Series,
+         length: int = 14) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """ADX with +DI and -DI (Wilder's method). Returns (adx, plus_di, minus_di)."""
+    prev_high = high.shift(1)
+    prev_low = low.shift(1)
+
+    plus_dm = (high - prev_high).where((high - prev_high) > (prev_low - low), 0.0)
+    plus_dm = plus_dm.where(plus_dm > 0, 0.0)
+    minus_dm = (prev_low - low).where((prev_low - low) > (high - prev_high), 0.0)
+    minus_dm = minus_dm.where(minus_dm > 0, 0.0)
+
+    atr_vals = _atr(high, low, close, length)
+
+    smooth_plus = plus_dm.ewm(alpha=1.0 / length, min_periods=length, adjust=False).mean()
+    smooth_minus = minus_dm.ewm(alpha=1.0 / length, min_periods=length, adjust=False).mean()
+
+    plus_di = 100.0 * smooth_plus / atr_vals.replace(0, np.nan)
+    minus_di = 100.0 * smooth_minus / atr_vals.replace(0, np.nan)
+
+    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.ewm(alpha=1.0 / length, min_periods=length, adjust=False).mean()
+
+    return adx, plus_di, minus_di
+
+
+# =====================================================================
+# PUBLIC API (same interface as before)
+# =====================================================================
 
 def calculate_all(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     """
@@ -15,30 +75,24 @@ def calculate_all(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     s = cfg["strategy"]
 
     # --- EMAs ---
-    df["ema_fast"] = ta.ema(df["close"], length=s["ema_fast"])
+    df["ema_fast"] = _ema(df["close"], s["ema_fast"])
 
-    # For H4 frame we also calculate slow/trend EMAs
     if "ema_slow" not in df.columns:
-        df["ema_slow"] = ta.ema(df["close"], length=s["ema_slow"])
+        df["ema_slow"] = _ema(df["close"], s["ema_slow"])
     if "ema_trend" not in df.columns:
-        df["ema_trend"] = ta.ema(df["close"], length=s["ema_trend"])
+        df["ema_trend"] = _ema(df["close"], s["ema_trend"])
 
     # --- RSI ---
-    df["rsi"] = ta.rsi(df["close"], length=s["rsi_period"])
+    df["rsi"] = _rsi(df["close"], s["rsi_period"])
 
     # --- ATR ---
-    df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=s["atr_period"])
+    df["atr"] = _atr(df["high"], df["low"], df["close"], s["atr_period"])
 
     # --- ADX with +DI / -DI ---
-    adx_df = ta.adx(df["high"], df["low"], df["close"], length=s["adx_period"])
-    if adx_df is not None and len(adx_df.columns) >= 3:
-        df["adx"] = adx_df.iloc[:, 0]
-        df["plus_di"] = adx_df.iloc[:, 1]
-        df["minus_di"] = adx_df.iloc[:, 2]
-    else:
-        df["adx"] = 0.0
-        df["plus_di"] = 0.0
-        df["minus_di"] = 0.0
+    adx, plus_di, minus_di = _adx(df["high"], df["low"], df["close"], s["adx_period"])
+    df["adx"] = adx
+    df["plus_di"] = plus_di
+    df["minus_di"] = minus_di
 
     return df
 
@@ -46,18 +100,13 @@ def calculate_all(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 def calculate_h4_trend(h4_df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     """Calculate trend indicators on H4 data."""
     s = cfg["strategy"]
-    h4_df["ema_slow"] = ta.ema(h4_df["close"], length=s["ema_slow"])
-    h4_df["ema_trend"] = ta.ema(h4_df["close"], length=s["ema_trend"])
+    h4_df["ema_slow"] = _ema(h4_df["close"], s["ema_slow"])
+    h4_df["ema_trend"] = _ema(h4_df["close"], s["ema_trend"])
 
-    adx_df = ta.adx(h4_df["high"], h4_df["low"], h4_df["close"], length=s["adx_period"])
-    if adx_df is not None and len(adx_df.columns) >= 3:
-        h4_df["adx"] = adx_df.iloc[:, 0]
-        h4_df["plus_di"] = adx_df.iloc[:, 1]
-        h4_df["minus_di"] = adx_df.iloc[:, 2]
-    else:
-        h4_df["adx"] = 0.0
-        h4_df["plus_di"] = 0.0
-        h4_df["minus_di"] = 0.0
+    adx, plus_di, minus_di = _adx(h4_df["high"], h4_df["low"], h4_df["close"], s["adx_period"])
+    h4_df["adx"] = adx
+    h4_df["plus_di"] = plus_di
+    h4_df["minus_di"] = minus_di
 
     return h4_df
 
