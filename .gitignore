@@ -21,6 +21,9 @@ logs/*.log
 logs/*.csv
 logs/*.json
 
+# Historical data CSVs (large files, exported via data_export.py)
+data/*.csv
+
 # IDE
 .vscode/
 .idea/

@@ -1,13 +1,20 @@
 """
 broker/data_feed.py - Price data abstraction.
 
-  dry_run / backtest: uses yfinance (works on Mac)
-  live:               uses MT5 copy_rates (Windows VPS)
+Data source priority for backtesting:
+  1. CSV files in data/ folder (platform-independent, exported via data_export.py)
+  2. MT5 copy_rates_range (Windows only, 10+ years of H1 data)
+  3. yfinance (any platform, limited to ~730 days for H1)
+
+Real-time (dry_run / live):
+  dry_run: yfinance
+  live:    MT5 copy_rates
 """
 from __future__ import annotations
 import time
 import pandas as pd
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 from core.indicators import resample_to_h4
 
@@ -45,10 +52,115 @@ class DataFeed:
                        end: str = "2025-12-31") -> Optional[pd.DataFrame]:
         """
         Get full historical data for backtesting.
-        yfinance limits H1 to ~730 days from today.
-        Downloads in 200-day chunks, auto-adjusting start to the
-        earliest date yfinance can serve.
+        Priority: 1) CSV in data/ → 2) MT5 → 3) yfinance (730-day limit)
         """
+        # --- 1. Try CSV files first (exported via data_export.py) ---
+        csv_df = self._load_csv_historical(timeframe, start, end)
+        if csv_df is not None:
+            return csv_df
+
+        # --- 2. Try MT5 (Windows only, 10+ years) ---
+        mt5_df = self._get_mt5_historical(timeframe, start, end)
+        if mt5_df is not None:
+            return mt5_df
+
+        # --- 3. Fallback: yfinance (limited to ~730 days for H1) ---
+        return self._get_yfinance_historical(timeframe, start, end)
+
+    # ------------------------------------------------------------------
+    def _load_csv_historical(self, timeframe: str, start: str,
+                             end: str) -> Optional[pd.DataFrame]:
+        """Load historical data from CSV files in data/ folder."""
+        data_dir = Path("data")
+        if not data_dir.exists():
+            return None
+
+        # Look for matching CSV: data/EURUSD_H1.csv
+        tf_label = timeframe.upper().replace("1H", "H1").replace("4H", "H4")
+        csv_path = data_dir / f"{self.symbol}_{tf_label}.csv"
+
+        if not csv_path.exists():
+            return None
+
+        try:
+            print(f"[DATA] Loading from CSV: {csv_path}")
+            df = pd.read_csv(csv_path, parse_dates=["time"], index_col="time")
+            df.columns = [c.lower() for c in df.columns]
+
+            # Ensure UTC timezone
+            if df.index.tz is None:
+                df.index = df.index.tz_localize("UTC")
+            else:
+                df.index = df.index.tz_convert("UTC")
+
+            # Filter date range
+            start_dt = pd.Timestamp(start, tz="UTC")
+            end_dt = pd.Timestamp(end, tz="UTC")
+            df = df[(df.index >= start_dt) & (df.index <= end_dt)]
+
+            if len(df) < 50:
+                print(f"[DATA] CSV has only {len(df)} bars in range, skipping")
+                return None
+
+            print(f"[DATA] CSV loaded: {len(df)} bars from {df.index[0].date()} to {df.index[-1].date()}")
+            return df[["open", "high", "low", "close", "volume"]]
+
+        except Exception as e:
+            print(f"[DATA] CSV load error: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    def _get_mt5_historical(self, timeframe: str, start: str,
+                            end: str) -> Optional[pd.DataFrame]:
+        """Fetch historical data from MT5 using copy_rates_range."""
+        try:
+            import MetaTrader5 as mt5
+        except ImportError:
+            return None
+
+        if not mt5.terminal_info():
+            # MT5 not initialized — try to init
+            mt5_cfg = self.cfg.get("mt5", {})
+            if not mt5.initialize(path=mt5_cfg.get("path", ""),
+                                  timeout=mt5_cfg.get("timeout", 10000)):
+                return None
+
+        try:
+            tf_map = {
+                "1h": mt5.TIMEFRAME_H1, "H1": mt5.TIMEFRAME_H1,
+                "4h": mt5.TIMEFRAME_H4, "H4": mt5.TIMEFRAME_H4,
+                "1d": mt5.TIMEFRAME_D1, "D1": mt5.TIMEFRAME_D1,
+            }
+            mt5_tf = tf_map.get(timeframe, mt5.TIMEFRAME_H1)
+
+            start_dt = datetime.strptime(start, "%Y-%m-%d")
+            end_dt = datetime.strptime(end, "%Y-%m-%d")
+
+            print(f"[DATA] Fetching from MT5: {self.symbol} {timeframe} "
+                  f"{start_dt.date()} → {end_dt.date()}...")
+
+            rates = mt5.copy_rates_range(self.symbol, mt5_tf, start_dt, end_dt)
+            if rates is None or len(rates) == 0:
+                print(f"[DATA] MT5 returned no data: {mt5.last_error()}")
+                return None
+
+            df = pd.DataFrame(rates)
+            df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+            df.set_index("time", inplace=True)
+            df.rename(columns={"tick_volume": "volume"}, inplace=True)
+            df = df[["open", "high", "low", "close", "volume"]]
+
+            print(f"[DATA] MT5 loaded: {len(df)} bars from {df.index[0].date()} to {df.index[-1].date()}")
+            return df
+
+        except Exception as e:
+            print(f"[DATA] MT5 historical error: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    def _get_yfinance_historical(self, timeframe: str, start: str,
+                                 end: str) -> Optional[pd.DataFrame]:
+        """Fallback: download from yfinance (H1 limited to ~730 days)."""
         try:
             import yfinance as yf
             ticker = self._yf_ticker()
@@ -69,9 +181,7 @@ class DataFeed:
             if end_dt > now + timedelta(days=1):
                 end_dt = now + timedelta(days=1)
 
-            # Use 200-day chunks to stay well within limits
             chunk_days = 200
-
             all_chunks = []
             current_start = start_dt
 
@@ -98,7 +208,7 @@ class DataFeed:
                     print(f"[DATA]   → No data returned")
 
                 current_start = current_end
-                time.sleep(0.5)  # Rate limit courtesy
+                time.sleep(0.5)
 
             if not all_chunks:
                 print("[DATA] No data downloaded")
