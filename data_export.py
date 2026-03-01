@@ -154,56 +154,75 @@ def _ticks_to_h1_bar(ticks: list, bar_time: datetime) -> dict | None:
     }
 
 
-def download_dukascopy(symbol: str, start: str, end: str):
-    """Download H1 data from Dukascopy and save to CSV."""
-    start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    end_dt = datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-
-    total_hours = int((end_dt - start_dt).total_seconds() / 3600)
-    print(f"Downloading {symbol} from Dukascopy: {start} → {end}")
-    print(f"Total hours to fetch: {total_hours:,} (~{total_hours // 24:,} days)")
-    print()
-
-    session = requests.Session()
-    session.headers["User-Agent"] = "Mozilla/5.0"
-
-    bars = []
+def _build_hour_list(start_dt: datetime, end_dt: datetime) -> list[datetime]:
+    """Build list of hours to download, skipping weekends."""
+    hours = []
     current = start_dt
-    fetched = 0
-    errors = 0
-    last_print = time.time()
-
     while current < end_dt:
-        # Skip weekends (Sat 22:00 UTC to Sun 22:00 UTC approx)
+        # Skip weekends (Sat 22:00 UTC to Sun 22:00 UTC)
         if current.weekday() == 5 and current.hour >= 22:
             current += timedelta(hours=1)
             continue
         if current.weekday() == 6:
             current += timedelta(hours=1)
             continue
-
-        ticks = _download_hour(symbol, current, session)
-        if ticks:
-            bar = _ticks_to_h1_bar(ticks, current)
-            if bar:
-                bars.append(bar)
-        else:
-            errors += 1
-
-        fetched += 1
+        hours.append(current)
         current += timedelta(hours=1)
+    return hours
 
-        # Progress every 10 seconds
-        if time.time() - last_print > 10:
-            pct = fetched / max(total_hours, 1) * 100
-            print(f"  Progress: {pct:.1f}% | {len(bars):,} bars | "
-                  f"Current: {current.strftime('%Y-%m-%d')} | "
-                  f"Empty hours: {errors}")
-            last_print = time.time()
 
-        # Rate limit: ~50 requests/sec is safe for Dukascopy
-        if fetched % 100 == 0:
-            time.sleep(0.2)
+def _download_batch(args):
+    """Download a single hour — for use with ThreadPoolExecutor."""
+    symbol, dt, max_retries = args
+    session = requests.Session()
+    session.headers["User-Agent"] = "Mozilla/5.0"
+    ticks = _download_hour(symbol, dt, session, max_retries)
+    if ticks:
+        bar = _ticks_to_h1_bar(ticks, dt)
+        return bar
+    return None
+
+
+def download_dukascopy(symbol: str, start: str, end: str, workers: int = 10):
+    """Download H1 data from Dukascopy using parallel connections and save to CSV."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_dt = datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+    hours = _build_hour_list(start_dt, end_dt)
+    total = len(hours)
+    print(f"Downloading {symbol} from Dukascopy: {start} → {end}")
+    print(f"Market hours to fetch: {total:,} | Parallel workers: {workers}")
+    print()
+
+    bars = []
+    errors = 0
+    done = 0
+    last_print = time.time()
+
+    # Process in daily chunks (24 hours) to show progress and save incrementally
+    chunk_size = 24 * workers  # ~240 hours per batch
+    for chunk_start in range(0, total, chunk_size):
+        chunk = hours[chunk_start:chunk_start + chunk_size]
+        tasks = [(symbol, dt, 3) for dt in chunk]
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_download_batch, t): t for t in tasks}
+            for future in as_completed(futures):
+                done += 1
+                result = future.result()
+                if result:
+                    bars.append(result)
+                else:
+                    errors += 1
+
+                if time.time() - last_print > 10:
+                    pct = done / max(total, 1) * 100
+                    print(f"  Progress: {pct:.1f}% | {len(bars):,} bars | "
+                          f"Done: {done:,}/{total:,} | "
+                          f"Empty hours: {errors}")
+                    last_print = time.time()
 
     if not bars:
         print("ERROR: No data downloaded")
