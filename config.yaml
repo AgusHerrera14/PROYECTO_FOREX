@@ -9,9 +9,9 @@ mode: "dry_run"
 # --- MT5 Connection (live mode only, Windows VPS) ---
 mt5:
   path: "C:/Program Files/MetaTrader 5/terminal64.exe"
-  login: 0
+  login: 103720564
   password: ""
-  server: ""
+  server: "MetaQuotes-Demo"
   timeout: 10000
 
 # --- Symbol & Timeframe ---
@@ -82,7 +82,7 @@ risk:
 
 # --- FundedNext Compliance ---
 compliance:
-  initial_balance: 6000.0
+  initial_balance: 100000.0
   max_daily_loss_pct: 3.5      # Internal limit (prop = 5%)
   max_total_dd_pct: 8.0        # Internal limit (prop = 10%)
   trailing_dd_enabled: true
@@ -139,6 +139,6 @@ logging:
 backtest:
   start_date: "2024-01-01"
   end_date: "2026-12-31"
-  initial_balance: 6000.0
+  initial_balance: 100000.0
   spread_pips: 1.0
   slippage_pips: 0.5

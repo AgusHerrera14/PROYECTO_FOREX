@@ -1,9 +1,13 @@
 """
 core/indicators.py - Technical indicator calculations.
-Pure pandas/pandas_ta, platform-independent.
+Pure pandas, platform-independent.
 """
 import pandas as pd
-import pandas_ta as ta
+
+try:
+    import pandas_ta as ta
+except ImportError:
+    import core.pandas_ta_shim as ta
 
 
 def calculate_all(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
