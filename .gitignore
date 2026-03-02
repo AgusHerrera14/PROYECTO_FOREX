@@ -9,6 +9,7 @@ build/
 
 # Environment & secrets
 .env
+set_env.bat
 *.key
 credentials.json
 
