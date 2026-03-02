@@ -435,6 +435,7 @@ def run_backtest(cfg: dict):
     warmup = 250
     trades_total = 0
     trades_won = 0
+    trade_open_times = []  # Track bar times when trades open (for avg time between trades)
 
     # Diagnostic counters
     bt_diag = {
@@ -538,6 +539,7 @@ def run_backtest(cfg: dict):
         gateway.open_trade(signal.direction, lots, signal.sl, signal.tp, "TrendPullback")
         compliance.on_trade_opened()
         bt_diag["trades_opened"] += 1
+        trade_open_times.append(bar_time)
 
     # Close any remaining position
     gateway.close_all("BACKTEST_END")
@@ -552,13 +554,14 @@ def run_backtest(cfg: dict):
     actual_start = h1_all.index[warmup]
     actual_end = h1_all.index[-1]
     print_backtest_report(gateway, trades_total, trades_won, cfg,
-                          actual_start=actual_start, actual_end=actual_end)
+                          actual_start=actual_start, actual_end=actual_end,
+                          trade_open_times=trade_open_times)
     print_backtest_diagnostics(bt_diag, strategy_diag)
     logger.close()
 
 
 def print_backtest_report(gateway: DryRunGateway, total: int, wins: int, cfg: dict,
-                          actual_start=None, actual_end=None):
+                          actual_start=None, actual_end=None, trade_open_times=None):
     """Print comprehensive backtest results."""
     init_bal = cfg["compliance"]["initial_balance"]
     final_bal = gateway.balance
@@ -645,8 +648,21 @@ def print_backtest_report(gateway: DryRunGateway, total: int, wins: int, cfg: di
     print(f"  Annualized:       ${annual_return_dollar:,.0f}/yr ({annual_return_pct:+.1f}%/yr)")
     print(f"  Spread sim:       {cfg['backtest']['spread_pips']} pips")
     print(f"  Slippage sim:     {cfg['backtest']['slippage_pips']} pips")
+    # Avg time between trades
+    avg_time_str = "N/A"
+    if trade_open_times and len(trade_open_times) > 1:
+        deltas_hours = [(trade_open_times[i + 1] - trade_open_times[i]).total_seconds() / 3600
+                        for i in range(len(trade_open_times) - 1)]
+        avg_hours = np.mean(deltas_hours)
+        avg_days = avg_hours / 24
+        if avg_days >= 1:
+            avg_time_str = f"{avg_days:.1f} days ({avg_hours:.1f} hours)"
+        else:
+            avg_time_str = f"{avg_hours:.1f} hours"
+
     print("-" * 60)
     print(f"  Total Trades:     {total}")
+    print(f"  Avg Time Between Trades: {avg_time_str}")
     print(f"  Buys / Sells:     {buy_count} / {sell_count}")
     print(f"  Wins:             {wins} ({win_rate:.1f}%)")
     print(f"  Losses:           {total - wins}")
