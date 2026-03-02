@@ -1,5 +1,5 @@
 """
-ops/logger.py - CSV trade logging + system log + daily summary.
+ops/logger.py - CSV trade logging + system log + daily summary + Excel report.
 """
 from __future__ import annotations
 import csv
@@ -7,6 +7,8 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+
+from ops.excel_report import ExcelReporter
 
 
 class TradeLogger:
@@ -26,12 +28,21 @@ class TradeLogger:
         if self.trade_csv_enabled:
             self._open_trade_csv()
 
+        # Excel reporter
+        self._excel = ExcelReporter(cfg)
+
+        # Open-trade cache: ticket -> open data (for pairing open/close)
+        self._open_trades: dict[int, dict] = {}
+
         # Daily stats
         self._day_trades = 0
         self._day_wins = 0
         self._day_pnl = 0.0
         self._day_max_dd = 0.0
         self._current_day = datetime.now(timezone.utc).date()
+
+        # Track balance/peak for DD calculation in Excel summary
+        self._peak_balance = cfg.get("compliance", {}).get("initial_balance", 100000.0)
 
     # ------------------------------------------------------------------
     #  Trade CSV
@@ -40,6 +51,7 @@ class TradeLogger:
                        entry: float, sl: float, tp: float, lots: float,
                        risk_pct: float, spread: float, news_status: str,
                        reason: str, equity: float, balance: float, dd_pct: float):
+        now = datetime.now(timezone.utc)
         self._write_trade_row({
             "timestamp": self._ts(),
             "event": "OPEN",
@@ -60,9 +72,30 @@ class TradeLogger:
             "dd_pct": f"{dd_pct:.2f}",
         })
 
+        # Cache open data for Excel pairing
+        from core.indicators import price_to_pips
+        sl_pips = round(price_to_pips(abs(entry - sl)), 1)
+        tp_pips = round(price_to_pips(abs(tp - entry)), 1)
+        self._open_trades[ticket] = {
+            "open_time": now,
+            "strategy": strategy,
+            "direction": direction,
+            "entry": round(entry, 5),
+            "sl": round(sl, 5),
+            "tp": round(tp, 5),
+            "lots": round(lots, 2),
+            "risk_pct": round(risk_pct, 2),
+            "sl_pips": sl_pips,
+            "tp_pips": tp_pips,
+            "spread": round(spread, 1),
+            "news_status": news_status,
+            "signal_reason": reason,
+        }
+
     def log_trade_close(self, ticket: int, strategy: str, direction: str,
                         entry: float, exit_price: float, lots: float,
                         pnl: float, reason: str, equity: float, balance: float):
+        now = datetime.now(timezone.utc)
         self._write_trade_row({
             "timestamp": self._ts(),
             "event": "CLOSE",
@@ -89,6 +122,42 @@ class TradeLogger:
         if pnl > 0:
             self._day_wins += 1
 
+        # Track peak balance for DD
+        self._peak_balance = max(self._peak_balance, balance)
+
+        # Build Excel row from cached open data + close data
+        open_data = self._open_trades.pop(ticket, {})
+        open_time = open_data.get("open_time", now)
+        duration = now - open_time
+        hours = int(duration.total_seconds() // 3600)
+        mins = int((duration.total_seconds() % 3600) // 60)
+        duration_str = f"{hours}h {mins}m"
+
+        self._excel.record_trade({
+            "date": now.strftime("%Y-%m-%d"),
+            "time": now.strftime("%H:%M:%S"),
+            "ticket": ticket,
+            "strategy": open_data.get("strategy", strategy),
+            "direction": open_data.get("direction", direction),
+            "entry": open_data.get("entry", round(entry, 5)),
+            "sl": open_data.get("sl", ""),
+            "tp": open_data.get("tp", ""),
+            "exit_price": round(exit_price, 5),
+            "lots": open_data.get("lots", round(lots, 2)),
+            "risk_pct": open_data.get("risk_pct", ""),
+            "sl_pips": open_data.get("sl_pips", ""),
+            "tp_pips": open_data.get("tp_pips", ""),
+            "spread": open_data.get("spread", ""),
+            "pnl": round(pnl, 2),
+            "duration": duration_str,
+            "close_reason": reason,
+            "news_status": open_data.get("news_status", ""),
+            "signal_reason": open_data.get("signal_reason", ""),
+            "equity": round(equity, 2),
+            "balance": round(balance, 2),
+            "dd_pct": round(max(0, (self._peak_balance - balance) / self._peak_balance * 100), 2),
+        })
+
     # ------------------------------------------------------------------
     #  System log
     # ------------------------------------------------------------------
@@ -108,22 +177,28 @@ class TradeLogger:
     # ------------------------------------------------------------------
     #  Daily summary
     # ------------------------------------------------------------------
-    def write_daily_summary(self):
+    def write_daily_summary(self, balance: float | None = None):
         wr = (self._day_wins / self._day_trades * 100) if self._day_trades > 0 else 0
         msg = (f"DAILY SUMMARY | Trades: {self._day_trades} | "
                f"Wins: {self._day_wins} | WR: {wr:.1f}% | "
                f"PnL: ${self._day_pnl:.2f}")
         self.info(msg)
 
+        # Export to Excel
+        if self._excel.has_pending_trades():
+            bal = balance if balance is not None else 0
+            self._excel.export_daily(bal, self._peak_balance)
+            self.info(f"Excel report updated: {self._excel.filepath}")
+
         # Reset for new day
         self._day_trades = 0
         self._day_wins = 0
         self._day_pnl = 0.0
 
-    def check_new_day(self):
+    def check_new_day(self, balance: float | None = None):
         today = datetime.now(timezone.utc).date()
         if today != self._current_day:
-            self.write_daily_summary()
+            self.write_daily_summary(balance)
             self._current_day = today
             self._open_trade_csv()  # New file for new month
 
@@ -132,8 +207,8 @@ class TradeLogger:
         if self._trade_file:
             self._trade_file.flush()
 
-    def close(self):
-        self.write_daily_summary()
+    def close(self, balance: float | None = None):
+        self.write_daily_summary(balance)
         if self._trade_file:
             self._trade_file.close()
             self._trade_file = None

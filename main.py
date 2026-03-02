@@ -29,7 +29,7 @@ from core.strategy import get_signal, diag as strategy_diag, reset_diagnostics
 from core.risk import calculate_lot_size, validate_sl_tp
 from core.compliance import ComplianceEngine, RiskState
 from core.news import NewsFilter
-from broker.mt5_gateway import create_gateway, DryRunGateway
+from broker.mt5_gateway import create_gateway, DryRunGateway, LiveGateway
 from broker.data_feed import DataFeed
 from ops.logger import TradeLogger
 from ops.alerts import TelegramAlerts
@@ -142,7 +142,8 @@ def run_cycle(cfg: dict, gateway, data_feed: DataFeed,
               state: dict):
     """Execute one trading cycle. Returns updated state dict."""
 
-    logger.check_new_day()
+    acct_for_day = gateway.get_account_info()
+    logger.check_new_day(acct_for_day.balance)
 
     # --- 1. Health check ---
     if not gateway.is_connected():
@@ -176,6 +177,45 @@ def run_cycle(cfg: dict, gateway, data_feed: DataFeed,
 
     # --- 3. Manage open positions (every cycle) ---
     manage_open_positions(gateway, cfg, atr, logger)
+
+    # --- 3b. Detect closed positions (for Excel logging) ---
+    current_tickets = {p.ticket for p in gateway.get_positions()}
+    prev_tickets = state.get("open_tickets", set())
+    for closed_ticket in prev_tickets - current_tickets:
+        # Position was closed by MT5 (SL/TP hit or manual close)
+        open_info = state.get("tracked_trades", {}).get(closed_ticket, {})
+        if not open_info:
+            continue
+        close_info = None
+        if isinstance(gateway, LiveGateway):
+            close_info = gateway.get_closed_deal(closed_ticket)
+        if close_info:
+            exit_price = close_info["exit_price"]
+            pnl = close_info["pnl"]
+            close_reason = close_info["reason"]
+        else:
+            exit_price = gateway.get_bid() if open_info.get("dir", 1) > 0 else gateway.get_ask()
+            pnl = 0
+            close_reason = "CLOSED"
+        acct_now = gateway.get_account_info()
+        logger.log_trade_close(
+            ticket=closed_ticket,
+            strategy=open_info.get("strategy", "TrendPullback"),
+            direction="BUY" if open_info.get("dir", 1) > 0 else "SELL",
+            entry=open_info.get("entry", 0),
+            exit_price=exit_price,
+            lots=open_info.get("lots", 0),
+            pnl=pnl,
+            reason=close_reason,
+            equity=acct_now.equity,
+            balance=acct_now.balance,
+        )
+        compliance.on_trade_closed(pnl, acct_now.balance)
+        dir_str = "BUY" if open_info.get("dir", 1) > 0 else "SELL"
+        logger.info(f"TRADE CLOSED: {dir_str} ticket {closed_ticket} | "
+                     f"PnL: ${pnl:.2f} | Reason: {close_reason}")
+        alerts.trade_closed(dir_str, pnl, close_reason)
+    state["open_tickets"] = current_tickets
 
     # --- 4. News defensive actions ---
     news.refresh()
@@ -279,6 +319,16 @@ def run_cycle(cfg: dict, gateway, data_feed: DataFeed,
                      f"Spread: {spread:.1f}")
         alerts.trade_opened(direction_str, lots, result.price,
                             signal.sl, signal.tp, signal.sl_pips, signal.reason)
+
+        # Track for close detection
+        tracked = state.setdefault("tracked_trades", {})
+        tracked[result.ticket] = {
+            "dir": signal.direction,
+            "entry": result.price,
+            "lots": lots,
+            "strategy": "TrendPullback",
+        }
+        state["open_tickets"] = state.get("open_tickets", set()) | {result.ticket}
     else:
         logger.error(f"Trade failed: {result.error}")
 
@@ -341,8 +391,9 @@ def run_realtime(cfg: dict):
         alerts.bot_stopped("User interrupt")
     finally:
         gateway.close_all("BOT_SHUTDOWN")
+        acct_final = gateway.get_account_info()
         gateway.disconnect()
-        logger.close()
+        logger.close(acct_final.balance)
 
 
 # ==================================================================

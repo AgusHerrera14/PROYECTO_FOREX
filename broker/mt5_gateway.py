@@ -579,6 +579,25 @@ class LiveGateway(BrokerGateway):
                     }
                     self.mt5.order_send(request)
 
+    def get_closed_deal(self, ticket: int) -> Optional[dict]:
+        """Get details of a closed position from MT5 deal history."""
+        from datetime import timedelta
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=1)
+        deals = self.mt5.history_deals_get(start, now, group=self.symbol)
+        if deals is None:
+            return None
+        # Find the closing deal for this position ticket
+        for deal in deals:
+            if deal.position_id == ticket and deal.entry == 1:  # entry=1 means exit deal
+                return {
+                    "exit_price": deal.price,
+                    "pnl": deal.profit,
+                    "lots": deal.volume,
+                    "reason": "TP_HIT" if deal.reason == 1 else "SL_HIT" if deal.reason == 2 else "CLOSED",
+                }
+        return None
+
 
 # ===================================================================
 # Factory
