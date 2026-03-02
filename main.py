@@ -711,10 +711,16 @@ def print_backtest_report(gateway: DryRunGateway, total: int, wins: int, cfg: di
         checks.append(f"  ❌ Expectancy ${expectancy:.2f} <= $0")
         go = False
 
-    if win_rate >= 40:
-        checks.append(f"  ✅ Win Rate {win_rate:.1f}% >= 40%")
+    if win_rate >= 50:
+        checks.append(f"  ✅ Win Rate {win_rate:.1f}% >= 50%")
     else:
-        checks.append(f"  ❌ Win Rate {win_rate:.1f}% < 40%")
+        checks.append(f"  ❌ Win Rate {win_rate:.1f}% < 50%")
+        go = False
+
+    if annual_return_pct >= 15.0:
+        checks.append(f"  ✅ Annual Return {annual_return_pct:.1f}% >= 15%")
+    else:
+        checks.append(f"  ❌ Annual Return {annual_return_pct:.1f}% < 15%")
         go = False
 
     print("\n  GO / NO-GO CHECKS:")
@@ -723,6 +729,24 @@ def print_backtest_report(gateway: DryRunGateway, total: int, wins: int, cfg: di
 
     verdict = "🟢 GO → Proceed to demo testing" if go else "🔴 NO-GO → Review strategy parameters"
     print(f"\n  VERDICT: {verdict}")
+
+    # FundedNext Challenge Estimate
+    if total > 0 and years > 0:
+        trades_per_month = total / (years * 12)
+        if expectancy > 0:
+            monthly_profit_pct = (expectancy * trades_per_month) / init_bal * 100
+            months_phase1 = 8.0 / monthly_profit_pct if monthly_profit_pct > 0 else float('inf')
+            months_phase2 = 5.0 / monthly_profit_pct if monthly_profit_pct > 0 else float('inf')
+        else:
+            monthly_profit_pct = 0
+            months_phase1 = float('inf')
+            months_phase2 = float('inf')
+        print(f"\n  FUNDEDNEXT CHALLENGE ESTIMATE:")
+        print(f"    Trades/month:           {trades_per_month:.1f}")
+        print(f"    Monthly profit (est):   {monthly_profit_pct:.2f}%")
+        print(f"    Phase 1 (8%):           {months_phase1:.1f} months")
+        print(f"    Phase 2 (5%):           {months_phase2:.1f} months")
+
     print("=" * 60 + "\n")
 
 
