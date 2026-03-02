@@ -39,8 +39,17 @@ from ops.alerts import TelegramAlerts
 # LOAD CONFIG
 # ==================================================================
 def load_config(path: str = "config.yaml") -> dict:
+    import os
     with open(path, "r") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    # Override secrets from environment variables (keeps them out of git)
+    if os.environ.get("MT5_PASSWORD"):
+        cfg["mt5"]["password"] = os.environ["MT5_PASSWORD"]
+    if os.environ.get("TELEGRAM_BOT_TOKEN"):
+        cfg["telegram"]["bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"]
+    if os.environ.get("TELEGRAM_CHAT_ID"):
+        cfg["telegram"]["chat_id"] = os.environ["TELEGRAM_CHAT_ID"]
+    return cfg
 
 
 # ==================================================================

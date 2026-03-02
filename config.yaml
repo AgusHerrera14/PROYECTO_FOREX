@@ -1,16 +1,18 @@
 # ============================================================
 # FundedNext EURUSD Trading Bot - Configuration
 # ============================================================
-# mode: "dry_run" (Mac testing) | "backtest" | "live" (VPS)
+# mode: "dry_run" (Mac testing) | "backtest" | "live" (Windows + MT5)
 # ============================================================
 
-mode: "dry_run"
+mode: "live"
 
-# --- MT5 Connection (live mode only, Windows VPS) ---
+# --- MT5 Connection (live mode only, Windows + MT5) ---
+# Secrets: set env vars MT5_PASSWORD, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+# or edit this file locally on your Windows machine (do NOT push secrets to git)
 mt5:
   path: "C:/Program Files/MetaTrader 5/terminal64.exe"
   login: 103720564
-  password: ""
+  password: ""          # Set via env var MT5_PASSWORD or edit locally
   server: "MetaQuotes-Demo"
   timeout: 10000
 
@@ -123,10 +125,12 @@ news:
   fail_safe: true
 
 # --- Telegram Alerts ---
+# Create bot via @BotFather, get chat_id via @userinfobot
+# Set via env vars TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID, or edit locally
 telegram:
-  enabled: false
-  bot_token: "YOUR_BOT_TOKEN_HERE"
-  chat_id: "YOUR_CHAT_ID_HERE"
+  enabled: true
+  bot_token: "YOUR_BOT_TOKEN_HERE"   # Set via env var or edit locally
+  chat_id: "YOUR_CHAT_ID_HERE"       # Set via env var or edit locally
 
 # --- Logging ---
 logging:
@@ -137,7 +141,7 @@ logging:
 
 # --- Backtest Settings ---
 backtest:
-  start_date: "2024-01-01"
+  start_date: "2020-01-01"
   end_date: "2026-12-31"
   initial_balance: 100000.0
   spread_pips: 1.0
