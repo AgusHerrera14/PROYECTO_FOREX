@@ -295,7 +295,7 @@ def _london_breakout(h1: pd.DataFrame, cfg: dict,
         return None
 
     # ---------------------------------------------------------------
-    # MODE B: SMC-ENHANCED BREAKOUT
+    # MODE B: SMC-ENHANCED BREAKOUT + QUALITY FILTERS
     # ---------------------------------------------------------------
     # SMC config
     use_fvg = s.get("smc_fvg_filter", False)
@@ -308,12 +308,30 @@ def _london_breakout(h1: pd.DataFrame, cfg: dict,
     # Current bar index in the DataFrame
     bar_idx = len(h1) - 1
 
+    # Quality filter indicators
+    adx = b0.get("adx", 0)
+    rsi = b0.get("rsi", 50)
+    ema21 = b0.get("ema_fast", 0)
+    ema50 = b0.get("ema_slow", 0)
+    adx_thresh = s.get("adx_threshold", 20)
+
+    # Breakout magnitude: price must be at least 2 pips beyond range
+    ps = price_to_pips(1)  # will use this to convert
+    min_breakout_pips = 2.0
+
     # === BUY: close breaks above Asian high ===
-    if close > asian_high:
+    breakout_pips_buy = price_to_pips(close - asian_high)
+    if close > asian_high and breakout_pips_buy >= min_breakout_pips:
         if use_trend_filter and ema200 > 0 and close < ema200:
             diag["london_trend_filter"] += 1
-        elif body_ratio < 0.3 or close <= b0["open"]:
+        elif body_ratio < 0.4 or close <= b0["open"]:
             diag["no_candle"] += 1
+        # Quality: EMA21 > EMA50 (short-term uptrend supports breakout)
+        elif ema21 > 0 and ema50 > 0 and ema21 < ema50:
+            diag["no_h4_slope"] += 1
+        # Quality: RSI not overbought
+        elif rsi > 75:
+            diag["no_rsi"] += 1
         else:
             # --- SMC Confluence Check ---
             smc_tags = []
@@ -333,11 +351,17 @@ def _london_breakout(h1: pd.DataFrame, cfg: dict,
             else:
                 entry = current_ask if current_ask > 0 else close
 
-                # --- SL: try Order Block first, fallback to Asian low ---
-                sl = asian_low - buffer
+                # --- SL: ATR-based (tighter) or Asian low (wider) ---
+                # Use ATR-based SL for tighter stop
+                atr_sl = entry - atr * s.get("breakout_atr_sl", 1.2)
+                range_sl = asian_low - buffer
+
+                # Take the TIGHTER of the two (but not tighter than min_sl)
+                sl = max(atr_sl, range_sl)  # max = closer to entry = tighter
+
                 if use_ob_sl:
                     ob_sl = get_nearest_ob_sl(h1, bar_idx, 1, entry)
-                    if ob_sl > 0:
+                    if ob_sl > 0 and ob_sl > sl:
                         sl = ob_sl - buffer * 0.5
                         smc_tags.append("OB_SL")
                         diag["smc_ob_sl"] += 1
@@ -345,7 +369,7 @@ def _london_breakout(h1: pd.DataFrame, cfg: dict,
                 sl_dist = entry - sl
                 sl_pips = price_to_pips(sl_dist)
 
-                if min_sl <= sl_pips <= 80:
+                if min_sl <= sl_pips <= 35:
                     # Adjust RR based on SMC confluence
                     effective_rr = rr_ratio
                     if len(smc_tags) >= 2:
@@ -367,11 +391,18 @@ def _london_breakout(h1: pd.DataFrame, cfg: dict,
                     return None
 
     # === SELL: close breaks below Asian low ===
-    if close < asian_low:
+    breakout_pips_sell = price_to_pips(asian_low - close)
+    if close < asian_low and breakout_pips_sell >= min_breakout_pips:
         if use_trend_filter and ema200 > 0 and close > ema200:
             diag["london_trend_filter"] += 1
-        elif body_ratio < 0.3 or close >= b0["open"]:
+        elif body_ratio < 0.4 or close >= b0["open"]:
             diag["no_candle"] += 1
+        # Quality: EMA21 < EMA50 (short-term downtrend supports breakout)
+        elif ema21 > 0 and ema50 > 0 and ema21 > ema50:
+            diag["no_h4_slope"] += 1
+        # Quality: RSI not oversold
+        elif rsi < 25:
+            diag["no_rsi"] += 1
         else:
             # --- SMC Confluence Check ---
             smc_tags = []
@@ -390,11 +421,16 @@ def _london_breakout(h1: pd.DataFrame, cfg: dict,
             else:
                 entry = current_bid if current_bid > 0 else close
 
-                # --- SL: try Order Block first, fallback to Asian high ---
-                sl = asian_high + buffer
+                # --- SL: ATR-based (tighter) or Asian high (wider) ---
+                atr_sl = entry + atr * s.get("breakout_atr_sl", 1.2)
+                range_sl = asian_high + buffer
+
+                # Take the TIGHTER of the two
+                sl = min(atr_sl, range_sl)  # min = closer to entry = tighter
+
                 if use_ob_sl:
                     ob_sl = get_nearest_ob_sl(h1, bar_idx, -1, entry)
-                    if ob_sl > 0:
+                    if ob_sl > 0 and ob_sl < sl:
                         sl = ob_sl + buffer * 0.5
                         smc_tags.append("OB_SL")
                         diag["smc_ob_sl"] += 1
@@ -402,7 +438,7 @@ def _london_breakout(h1: pd.DataFrame, cfg: dict,
                 sl_dist = sl - entry
                 sl_pips = price_to_pips(sl_dist)
 
-                if min_sl <= sl_pips <= 80:
+                if min_sl <= sl_pips <= 35:
                     effective_rr = rr_ratio
                     if len(smc_tags) >= 2:
                         effective_rr = rr_ratio * 1.15
