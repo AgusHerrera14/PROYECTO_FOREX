@@ -11,7 +11,7 @@ mode: "live"
 # or edit this file locally on your Windows machine (do NOT push secrets to git)
 mt5:
   path: "C:/Program Files/MetaTrader 5/terminal64.exe"
-  login: 103720564
+  login: 103778008
   password: ""          # Set via env var MT5_PASSWORD or edit locally
   server: "MetaQuotes-Demo"
   timeout: 10000
