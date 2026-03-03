@@ -509,8 +509,9 @@ def run_backtest(cfg: dict):
             bt_diag["compliance_blocked"] += 1
             continue
 
-        # Skip if position open
-        if gateway.has_position():
+        # Skip if max concurrent positions reached
+        max_pos = cfg["strategy"].get("max_concurrent_positions", 1)
+        if len(gateway.positions) >= max_pos:
             bt_diag["position_open"] += 1
             continue
 
@@ -536,7 +537,8 @@ def run_backtest(cfg: dict):
             continue
 
         # Execute
-        gateway.open_trade(signal.direction, lots, signal.sl, signal.tp, "TrendPullback")
+        strat_name = getattr(signal, 'strategy', '') or "TrendPullback"
+        gateway.open_trade(signal.direction, lots, signal.sl, signal.tp, strat_name)
         compliance.on_trade_opened()
         bt_diag["trades_opened"] += 1
         trade_open_times.append(bar_time)
@@ -775,6 +777,7 @@ def print_backtest_diagnostics(bt_diag: dict, strat_diag: dict):
     print(f"    Signals generated: {strat_diag['signals_generated']}")
     print(f"      Breakout sigs:  {strat_diag.get('breakout_signals', 0)}")
     print(f"      Pullback sigs:  {strat_diag.get('pullback_signals', 0)}")
+    print(f"      MeanRev sigs:   {strat_diag.get('meanrev_signals', 0)}")
     # London Breakout specific
     if strat_diag.get('london_wrong_hour', 0) > 0 or strat_diag.get('london_no_range', 0) > 0:
         print(f"  LONDON BREAKOUT DETAILS:")

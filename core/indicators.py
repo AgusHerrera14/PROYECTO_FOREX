@@ -44,6 +44,14 @@ def calculate_all(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         df["plus_di"] = 0.0
         df["minus_di"] = 0.0
 
+    # --- Bollinger Bands (for mean reversion strategy) ---
+    bb_period = s.get("bb_period", 20)
+    bb_std = s.get("bb_std", 2.0)
+    df["bb_middle"] = df["close"].rolling(bb_period).mean()
+    rolling_std = df["close"].rolling(bb_period).std()
+    df["bb_upper"] = df["bb_middle"] + bb_std * rolling_std
+    df["bb_lower"] = df["bb_middle"] - bb_std * rolling_std
+
     return df
 
 
